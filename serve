@@ -1,0 +1,1692 @@
+#!/usr/bin/env python3
+
+import asyncio
+import copy
+import hashlib
+import ipaddress
+import json
+import logging
+import math
+import os
+import re
+import socket
+import subprocess
+import sys
+import traceback
+from asyncio.subprocess import PIPE, Process
+from pathlib import Path
+from typing import Tuple
+
+# from caddyservercontroller import CaddyServerController
+
+# NOTE: Avoid truncated images resulting from image processing
+# https://discourse.gohugo.io/t/resized-images-some-truncated-to-0-bytes/21747/3
+# DO NOT USE --ignoreCache
+
+# NOTE: Once the [issue with resources.PostProcess](https://github.com/gohugoio/hugo/issues/7735)
+# is fixed, enable --printPathWarnings for all environments
+
+HUGO_PORT_NUM_MIN, HUGO_PORT_NUM_MAX = 10000, 32767
+DEFAULT_SERVICE_BIND_ADDRESS = "0.0.0.0"
+DEFAULT_HOSTNAME = "localhost"
+
+DEFAULT_ID = "_default"
+INTENT_MAP_KEY = "intent"
+
+CONTROLLER_VERBS = {
+    "serve": {
+        "init": {"site_verbs": ["init"]},
+        "up": {"site_verbs": ["up"]},
+        "down": {"site_verbs": ["down"], "aliases": ["dn"]},
+        "start": {"site_verbs": ["start"]},
+        "stop": {"site_verbs": ["stop"]},
+        "logs": {"site_verbs": ["logs"]},
+        "processes": {"site_verbs": ["processes"], "aliases": ["ps"]},
+        "restart": {"site_verbs": ["restart"]},
+        "reset": {"site_verbs": ["down", "up"]},
+        "shell": {"site_verbs": ["shell"]},
+    },
+    "deploy": {
+        "run": {"site_verbs": ["run"]},
+        "deploy": {"site_verbs": ["deploy"], "aliases": ["dn"]},
+    },
+}
+
+ENVIRONMENTS = {
+    DEFAULT_ID: {
+        "description": """ Purpose: provide sane defaults
+        Build: hugo
+        Server: `hugo server` and `caddy`
+        Hostname: localhost
+        Base URL: http://localhost:<random port> """,
+        "service_names": ["hugo_server", "hugo_build", "caddy_server"],
+        # Hugo has its own way to manage environments based on paramter "--environment",
+        # hence all environments have the same value for HUGO_CONF
+        "hugo_conf_template": "{hugo_config}",
+        "hugo_env": "prod",
+        "hugo_build_drafts": False,
+        "hugo_build_expired": False,
+        "hugo_build_future": False,
+        "hugo_print_path_warnings": False,
+        "hugo_print_i18n_warnings": False,
+        "hugo_url_scheme": "http",
+        "hostname_template": r"localhost",
+        "hugo_server_port": None,  # Use default (1313) from hugo
+        "hugo_server_bind": DEFAULT_SERVICE_BIND_ADDRESS,  # Use default ('0.0.0.0', i.e. bind to all interfaces)
+        "hugo_base_url_template": r"{hugo_url_scheme}://{hostname}",
+        "caddy_server_bind": DEFAULT_SERVICE_BIND_ADDRESS,  # Use default ('0.0.0.0', i.e. bind to all interfaces)
+        "caddy_server_port": 80,
+        "caddy_server_tls_port": 443,
+        "caddy_server_admin_port": 2019,
+        "caddy_server_admin_scheme": "http",
+        "caddy_server_admin_base_url_template": r"{caddy_server_admin_scheme}://{hostname}:{caddy_server_admin_port}",
+        INTENT_MAP_KEY: {
+            "serve": {
+                "service_names": ["hugo_server", "caddy_server"],
+                "hugo_url_scheme": "http",
+                "hostname_template": r"{env_id}.{site_domain}.local",
+            },
+            "deploy": {
+                "service_names": ["hugo_build"],
+                "hugo_url_scheme": "https",
+                "hostname_template": r"{env_id}.{site_domain}",
+            },
+        },
+    },
+    "devel": {
+        "description": """ Purpose: preview with live reloading on localhost
+        Target devices:
+          - Browsers running on the local machine
+        Server: hugo built-in web server
+        Hostname: devel.<site_id>.local
+        Base URL: http://<hostname>:80 """,
+        INTENT_MAP_KEY: {
+            "serve": {
+                "service_names": ["hugo_server"],
+                "hugo_env": "devel",
+                "hugo_build_drafts": True,
+                "hugo_print_path_warnings": False,
+                "hugo_print_i18n_warnings": False,
+                "hugo_url_scheme": "http",
+                "hugo_server_port": 80,
+                "hugo_base_url_template": r"{hugo_url_scheme}://{hostname}",
+                "hostname_template": r"{env_id}.{site_domain}.local",
+            }
+        },
+    },
+    "test": {
+        "description": """ Purpose: preview without live reloading on local network
+        Target devices:
+          - Mobile devices if the host of the base URL resolves to
+            a routable IP address
+          - Browsers on local machine or virtualized that might
+            have issues with live reloading
+        Server: caddy
+        Hostname: test.<site_id>.local
+        Base URL: http://<hostname>:80 """,
+        "hugo_env": "test",
+        "hugo_print_path_warnings": True,
+        "hugo_print_i18n_warnings": True,
+    },
+    "stage": {
+        "description": """ Purpose: generate and deploy output to stage server
+        Server: caddy
+        Hostname: stage.<site_id>.local
+        Base URL: <base URL configured in hugo environment "stage"> """,
+        "hugo_env": "stage",
+    },
+    "prod": {
+        "description": """ Purpose: generate and deploy output to production server
+        Server: caddy
+        Hostname: <site_id>.local (note: no hostname before the site_id)
+        Base URL: <base URL configured in hugo environment "prod"> """,
+        "hugo_env": "prod",
+        "hostname_template": r"{site_domain}.local",
+    },
+}
+
+DIRECTORIES = {
+    "docker": "docker",
+    "sites": "sites",
+    "modules": "modules",
+    "environs": "env",
+    "local": "local",
+    "cache": "cache",
+    "output": "output",
+    "logs": "logs",
+    "state": "state",
+    "hugo_root": "",
+    "hugo_content": "content",
+    "hugo_config": "config",
+    "hugo_resources": "resources",
+    "service_config": "services",
+}
+FILENAMES = {
+    "global_env_file": ".env",
+    "docker_override_file": "docker.env",
+    "docker_compose_values_file": "docker_generated.env",
+    "docker_compose": "docker-compose.yml",
+    "hugo_module_workspace_file": "go.work",
+    "caddy_server_caddyfile": "Caddyfile",
+}
+SUBPATHS = {
+    "docker": Path(DIRECTORIES["docker"]),
+    "modules": Path(DIRECTORIES["modules"]),
+    "sites": Path(DIRECTORIES["sites"]),
+    "global_env_file": Path(DIRECTORIES["local"]) / FILENAMES["global_env_file"],
+    "docker_override_file": Path(DIRECTORIES["local"])
+    / FILENAMES["docker_override_file"],
+    "docker_compose_values_file": Path(DIRECTORIES["local"])
+    / FILENAMES["docker_compose_values_file"],
+    "hugo_module_workspace": Path(DIRECTORIES["local"])
+    / FILENAMES["hugo_module_workspace_file"],
+    "hugo_config": Path(DIRECTORIES["hugo_root"]) / Path(DIRECTORIES["hugo_config"])
+    if Path(DIRECTORIES["hugo_root"])
+    else Path(DIRECTORIES["hugo_config"]),
+    "caddy_server_config": Path(DIRECTORIES["service_config"]) / "caddy",
+    "caddy_server_state": Path(DIRECTORIES["state"]) / "caddy",
+    "caddy_server_logs": Path(DIRECTORIES["logs"]) / "caddy",
+}
+
+#
+# Network alias configuration
+#
+IFACE_ALIAS_ADDR_NUM_MIN, IFACE_ALIAS_ADDR_NUM_MAX = 2, 253
+NUM_ALIASES_MAX = 10
+LOOPBACK_IFACE_LOOKUP_ADDR = ipaddress.IPv4Address("127.0.0.1")
+LOOPBACK_IFACE_ALIAS_NETMASK = 32
+DEFAULT_IFACE_LOOKUP_ADDR = ipaddress.IPv4Address("1.1.1.1")
+DEFAULT_IFACE_ALIAS_NETMASK = 32
+
+
+# Executables that are called by this script
+HUGO = {
+    "cmd": {
+        "build": ["hugo"],
+        "serve": ["hugo", "server"],
+    },
+    "common_opts": ["--cleanDestinationDir", "--forceSyncStatic"],
+    "common_opts_verbose": ["--verbose"],
+    "common_opts_debug": ["--debug"],
+}
+
+IFCONFIG_ALIAS = {
+    "cmd": ["sudo", "ifconfig"],
+    "verb": {
+        "up": {
+            "template": ["{iface}", "alias", "{addr}/{netmask}", "up"],
+            "check": True,
+        },
+        "down": {
+            "template": ["{iface}", "-alias", "{addr}"],
+            "check": False,
+        },
+    },
+}
+
+DOCKER_COMPOSE = {
+    "cmd": ["docker", "compose"],
+    "verb": {
+        "up": {
+            "command": "up",
+            "options": ["--remove-orphans", "--detach"],
+            "check": True,
+            "show_service_URL": True,
+            "attach_logs": True,
+        },
+        "logs": {
+            "command": "logs",
+            "options": [
+                "--follow",
+                "--no-log-prefix",
+                "--since",
+                "1m",
+            ],
+            "check": False,
+        },
+        "processes": {
+            "command": "ps",
+            "options": ["--all"],
+            "check": True,
+            "accept_services": "none",
+        },
+        "start": {
+            "command": "start",
+            "options": [],
+            "check": True,
+            "show_service_URL": True,
+            "attach_logs": True,
+        },
+        "restart": {
+            "command": "restart",
+            "options": [],
+            # "filter": {"status": "running"},
+            "check": True,
+            "show_service_URL": True,
+            "attach_logs": True,
+        },
+        "stop": {
+            "command": "stop",
+            "options": [],
+            "check": False,
+        },
+        "run": {
+            "command": "run",
+            "options": ["--rm"],
+            "accept_services": "single",
+            "check": True,
+            "attach_logs": True,
+        },
+        "shell": {
+            "command": "exec",
+            "options": ["{service_ids}"],
+            "args": ["/bin/sh"],
+            "accept_services": "single",
+            "check": False,
+        },
+        "down": {
+            "command": "down",
+            "options": [],
+            "check": False,
+        },
+    },
+    "common_opts_compose_file": ["--file"],
+    "common_opts_compose_project_name": ["--project-name"],
+    "common_opts_env_file": ["--env-file"],
+    "common_opts_verbose": ["--verbose"],
+}
+COMPOSE_PROJECT_PREFIX = "hugo_serve_"
+
+
+# Initialize logging
+def initialize_logging(level=logging.WARN):
+    # logging.basicConfig(format="%(levelname)s:  %(message)s", level=logging.NOTSET)
+    logging.basicConfig(format="%(message)s", level=logging.NOTSET)
+    logger = logging.getLogger()
+    logger.setLevel(level)
+    # Set the logging level for asyncio to WARNING to suppress informational messages
+    logging.getLogger("asyncio").setLevel(logging.WARNING)
+
+
+class Colors:
+    RED = "\033[31m"  # Red text
+    GREEN = "\033[32m"  # Green text
+    YELLOW = "\033[33m"  # Yellow text
+    BLUE = "\033[34m"  # Blue text
+    MAGENTA = "\033[35m"  # Magenta text
+    CYAN = "\033[36m"  # Cyan text
+    GREEN_BRIGHT = "\033[92m"  # Bright green text
+    RESET = "\033[0m"  # Reset to default color
+
+
+class Colors256:
+    PASTEL_YELLOW = "\033[38;5;229m"
+    PASTEL_GREEN = "\033[38;5;121m"
+    DARK_PASTEL_GREEN = "\033[38;5;72m"  # Darker pastel green
+    AZURE_BLUE = "\033[38;5;73m"  # Darker pastel green
+    DARK_PASTEL_BLUE = "\033[38;5;75m"  # Darker pastel green
+    PASTEL_BLUE = "\033[38;5;117m"
+    PASTEL_PINK = "\033[38;5;211m"
+    PASTEL_PURPLE = "\033[38;5;183m"
+    RESET = "\033[0m"
+
+
+def print_colored(text, color):
+    print(color + text + Colors.RESET)
+
+
+def _preprocess_output(*args, **kwargs):
+    # Turn all paths into relative paths
+    CWD = Path.cwd().as_posix()
+    if kwargs.get("relative_paths", True):
+        args = [re.sub(CWD + "/", "", str(a)) for a in args]
+    kwargs.pop("relative_paths", None)
+
+    # Check if 'color' is specified and valid, then apply color
+    color_code = kwargs.pop("color", None)
+    if color_code:
+        colored_message = color_code + " ".join(map(str, args)) + Colors.RESET
+        return colored_message, kwargs
+
+    return " ".join(map(str, args)), kwargs
+
+
+def dbg(*args, **kwargs):
+    message, kwargs = _preprocess_output(
+        *args, color=Colors256.DARK_PASTEL_GREEN, **kwargs
+    )
+    logging.getLogger().debug(message, **kwargs)
+
+
+def vrb(*args, **kwargs):
+    message, kwargs = _preprocess_output(
+        *args, color=Colors256.DARK_PASTEL_BLUE, **kwargs
+    )
+    logging.getLogger().info(message, **kwargs)
+
+
+def wrn(*args, **kwargs):
+    message, kwargs = _preprocess_output(*args, color=Colors256.PASTEL_YELLOW, **kwargs)
+    logging.getLogger().warning(message, **kwargs)
+
+
+def errxit(*args, **kwargs):
+    # Capture the exception's stack trace
+    exception_info = sys.exc_info()
+
+    # Preprocess the exception message and stack trace
+    prefix = f"{SCRIPT_PATH}: exiting due to an unrecoverable error"
+    args_concat = "\n".join(map(str, [prefix, *args]))
+    if exception_info and exception_info[0] is not None:
+        exception_info = "".join(traceback.format_exception(*sys.exc_info()))
+        args_concat = f"{exception_info} {args_concat}"  # Concatenate the stack trace and additional arguments
+
+    formatted_args, kwargs = _preprocess_output(args_concat, color=Colors.RED, **kwargs)
+
+    print("".join(formatted_args), file=sys.stderr, flush=True)
+
+    # Exit the program with a non-zero status code indicating error
+    sys.exit(1)
+
+
+class SiteEnvironmentConfigs:
+    def __init__(
+        self,
+        root_dir,
+        modules_root_dir,
+        content_path,
+        docker_compose_local_env,
+        site_dir,
+        site_id,
+        verbose,
+        debug,
+    ):
+        # Define default values for site
+        self.root_dir = root_dir
+        self.modules_root_dir = modules_root_dir
+        self.content_path = content_path
+        self.verbose = verbose
+        self.debug = debug
+
+        self.site_id = site_id
+        self.site_domain = SiteController._extract_domain(site_id)
+
+        # Default values for environments for all intents
+        # Hugo server port number: base value for devel environment
+        max_num_ports = HUGO_PORT_NUM_MAX - HUGO_PORT_NUM_MIN - len(ENVIRONMENTS.keys())
+        self.HUGO_BASE_PORT = HUGO_PORT_NUM_MIN + SiteEnvironmentConfigs._hash_number(
+            self.site_id, max_num_ports
+        )
+
+        site_env_config = self.get_site_env_config(
+            docker_compose_local_env, site_dir, site_id
+        )
+        self.config = site_env_config["config"]
+        self.docker_compose_values = site_env_config["docker_compose_values"]
+
+    def get_site_env_config(self, docker_compose_local_env, site_dir, site_id):
+        #
+        # Iterate over all environments, such as `devel`, `stage, `prod`, for this site
+        #
+
+        docker_compose_values = docker_compose_local_env.copy()
+        docker_compose_values["SITE_ID"] = site_id
+
+        for env_idx, env_id in enumerate(
+            (k for k in ENVIRONMENTS.keys() if k != DEFAULT_ID)
+        ):
+            env_config = ENVIRONMENTS[env_id]
+            intents = (
+                env_config[INTENT_MAP_KEY].keys()
+                if INTENT_MAP_KEY in env_config
+                else ENVIRONMENTS[DEFAULT_ID][INTENT_MAP_KEY].keys()
+            )
+            site_env_config = {"intents": {}}
+            for intent in intents:
+                content_dir = site_dir / DIRECTORIES["hugo_content"]
+                if intent in ["serve"] and self.content_path:
+                    content_dir = content_dir / self.content_path
+                    wrn(f"Passed --content-path: content_dir={content_dir}")
+                site_env_intent_config = {
+                    "hugo_root": site_dir,
+                    "hugo_modules": self.modules_root_dir,
+                    "hugo_module_workspace": "",
+                    "env": env_id,
+                    INTENT_MAP_KEY: intent,
+                    "content": content_dir,
+                    "cache": site_dir / DIRECTORIES["cache"] / intent / env_id,
+                    "dest": site_dir / DIRECTORIES["output"] / intent / env_id,
+                }
+                # NOTE: `HUGO_MODULE_WORKSPACE`` must be a relative path, which will be applied relative to `site_dir`
+                hugo_module_workspace_path = (
+                    site_dir / SUBPATHS["hugo_module_workspace"]
+                )
+                if hugo_module_workspace_path and hugo_module_workspace_path.is_file():
+                    site_env_intent_config["hugo_module_workspace"] = SUBPATHS[
+                        "hugo_module_workspace"
+                    ]
+
+                env_intent_config = SiteController._get_env_intent_config(
+                    env_id, intent
+                )
+                # Determine if either hugo_server or hugo_build is a service_name of this environment
+                if "service_names" in env_intent_config:
+                    site_env_intent_config = self.get_site_env_intent(
+                        site_dir,
+                        env_id,
+                        env_idx,
+                        intent,
+                        site_env_intent_config,
+                        env_intent_config,
+                    )
+
+                site_env_config["intents"][intent] = site_env_intent_config
+
+                docker_compose_values.update(
+                    dict(
+                        [
+                            (f"{env_id.upper()}_{intent.upper()}_{k.upper()}", v)
+                            for (k, v) in site_env_intent_config.items()
+                        ]
+                    )
+                )
+
+        # Override default values based on env files from site root directory
+        site_env_file_path = Path(site_dir / SUBPATHS["docker_override_file"])
+        if site_env_file_path.is_file():
+            vrb(f"Loading '{site_env_file_path}'")
+            docker_compose_values.update(
+                SiteConfigs._parse_env_file(site_env_file_path)
+            )
+
+        # Override default values based on env files from site environment directories
+        site_envm_root_dir = site_dir / DIRECTORIES["environs"]
+        if site_envm_root_dir.exists() and site_envm_root_dir.resolve().is_dir():
+            valid_envm_dirs = [
+                d
+                for d in site_envm_root_dir.iterdir()
+                if d.is_dir() and d.name not in DIRECTORIES.values()
+            ]
+            for envm_root_dir in valid_envm_dirs:
+                if self.env_ids and envm_root_dir.name not in self.env_ids:
+                    dbg(
+                        f"\n----    Site '{self.site_id}': "
+                        "not loading env '{envm_root_dir.name}' "
+                        "as only the following were selected: {self.env_ids} ----\n"
+                    )
+                    continue
+                envm_env_file_path = Path(
+                    envm_root_dir / SUBPATHS["docker_override_file"]
+                )
+                if envm_env_file_path.is_file():
+                    vrb(f"Loading '{envm_env_file_path}'")
+                    docker_compose_values.update(
+                        self._parse_env_file(envm_env_file_path)
+                    )
+
+        # Get path to environment file
+        env_file_path = site_dir / FILENAMES["global_env_file"]
+        if env_file_path.exists():
+            docker_compose_values["GLOBAL_ENV_FILE"] = env_file_path.as_posix()
+            vrb(
+                f"Adding global .env file: '{docker_compose_values['GLOBAL_ENV_FILE']}'"
+            )
+        else:
+            vrb(f"No global .env file at '{env_file_path}'")
+
+        # Override default values based on environment variables
+        for key in docker_compose_values.keys():
+            env_var = os.getenv(key)
+            if env_var:
+                vrb(f"Using environment variable {key}='{env_var}'")
+                docker_compose_values[key] = env_var
+
+        return {
+            "config": site_env_config,
+            "docker_compose_values": docker_compose_values,
+        }
+
+    def get_site_env_intent(
+        self, site_dir, env_id, env_idx, intent, site_env_intent, env_intent_config
+    ):
+        #
+        # Get hostname for serve or deploy
+
+        # Given that Hugo potentially generates output for a specific
+        # base URL, we assume that all services use the same hostname
+        # and run on different ports
+        hostname = None
+
+        if intent in ["serve"]:
+            hostname = self._env_default_template("hostname", env_id, intent)
+            # The intent is to serve content. Hence if there is a hostname,
+            # we need to be able to resolve that to an IP address
+            try:
+                serve_addr = socket.gethostbyname(hostname)
+            except socket.gaierror as e:
+                wrn(
+                    f"Failed to look up IP address of host {hostname}: {str(e)}\n Using default={DEFAULT_HOSTNAME}[bind={DEFAULT_SERVICE_BIND_ADDRESS}] instead"
+                )
+                serve_addr = DEFAULT_SERVICE_BIND_ADDRESS
+                hostname = DEFAULT_HOSTNAME
+
+            site_env_intent["hostname"] = hostname
+        elif intent in ["deploy"]:
+            hostname = self._env_default_template("hostname", env_id, intent)
+            # The intent is to deploy content, hence we only need the hostname
+            # to generate the base URL
+
+        else:
+            errxit(f"Invalid intent={intent}'")
+
+        # Hugo shares most of the config between the intents `serve` and `deploy`,
+        # therefore, we set defaults for these values independently of the intent
+        intent_env_hugo = {}
+        # debug|info|warn|error
+        hugo_log_level = "debug" if self.debug else "info" if self.verbose else "warn"
+
+        if bool({"hugo_server", "hugo_build"} & {*env_intent_config["service_names"]}):
+            intent_env_hugo["config"] = site_dir / SUBPATHS["hugo_config"]
+            intent_env_hugo["server_scheme"] = self._env_default(
+                "hugo_url_scheme", env_id, intent
+            )
+            intent_env_hugo["server_port"] = self._env_default(
+                "hugo_server_port",
+                env_id,
+                intent,
+                self.HUGO_BASE_PORT + env_idx,
+            )
+            intent_env_hugo["base_url"] = self._env_default_template(
+                "hugo_base_url",
+                env_id,
+                intent,
+                hugo_url_scheme=intent_env_hugo["server_scheme"],
+                hostname=hostname,
+            )
+            site_env_intent.update(
+                {
+                    "hugo_build_drafts": self._env_default(
+                        "hugo_build_drafts", env_id, intent
+                    ),
+                    "hugo_build_expired": self._env_default(
+                        "hugo_build_expired", env_id, intent
+                    ),
+                    "hugo_build_future": self._env_default(
+                        "hugo_build_future", env_id, intent
+                    ),
+                    "hugo_print_path_warnings": self._env_default(
+                        "hugo_print_path_warnings", env_id, intent
+                    ),
+                    "hugo_print_i18n_warnings": self._env_default(
+                        "hugo_print_i18n_warnings", env_id, intent
+                    ),
+                    "hugo_conf": self._env_default_template(
+                        "hugo_conf",
+                        env_id,
+                        intent,
+                        hugo_config=intent_env_hugo["config"],
+                    ),
+                    "hugo_env": self._env_default("hugo_env", env_id, intent),
+                    "hugo_base_url": intent_env_hugo["base_url"]
+                    if intent_env_hugo["base_url"].endswith("/")
+                    else intent_env_hugo["base_url"] + "/",
+                    "hugo_log_level": hugo_log_level,
+                }
+            )
+
+        if intent in ["serve"]:
+            if "hugo_server" in env_intent_config["service_names"]:
+                site_env_intent.update(
+                    {
+                        "hugo_server_addr": serve_addr,
+                        "hugo_server_bind": self._env_default(
+                            "hugo_server_bind",
+                            env_id,
+                            intent,
+                            DEFAULT_SERVICE_BIND_ADDRESS,
+                        ),
+                        "hugo_server_port": self._env_default(
+                            "hugo_server_port",
+                            env_id,
+                            intent,
+                            intent_env_hugo["server_port"],
+                        ),
+                    }
+                )
+            if "caddy_server" in env_intent_config["service_names"]:
+                caddy_server_admin_scheme = self._env_default(
+                    "caddy_server_admin_scheme", env_id, intent
+                )
+                caddy_server_admin_port = self._env_default(
+                    "caddy_server_admin_port", env_id, intent
+                )
+                site_env_intent.update(
+                    {
+                        "caddy_server_addr": serve_addr,
+                        "caddy_server_bind": self._env_default(
+                            "caddy_server_bind",
+                            env_id,
+                            intent,
+                            DEFAULT_SERVICE_BIND_ADDRESS,
+                        ),
+                        "caddy_server_port": self._env_default(
+                            "caddy_server_port", env_id, intent
+                        ),
+                        "caddy_server_tls_port": self._env_default(
+                            "caddy_server_tls_port", env_id, intent
+                        ),
+                        "caddy_server_admin_port": caddy_server_admin_port,
+                        "caddy_server_admin_base_url": self._env_default_template(
+                            "caddy_server_admin_base_url",
+                            env_id,
+                            intent,
+                            caddy_server_admin_scheme=caddy_server_admin_scheme,
+                            hostname=hostname,
+                            caddy_server_admin_port=caddy_server_admin_port,
+                        ),
+                        "caddy_server_conf": self.root_dir
+                        / SUBPATHS["caddy_server_config"],
+                        "caddy_server_state": site_dir
+                        / SUBPATHS["caddy_server_state"]
+                        / intent
+                        / env_id,
+                    }
+                )
+
+        return site_env_intent
+
+    # Private methods
+    def _env_default(self, key, env_id, intent, default_value=None):
+        if (
+            INTENT_MAP_KEY in ENVIRONMENTS[env_id]
+            and intent in ENVIRONMENTS[env_id][INTENT_MAP_KEY]
+            and key in ENVIRONMENTS[env_id][INTENT_MAP_KEY][intent]
+        ):
+            return ENVIRONMENTS[env_id][INTENT_MAP_KEY][intent][key]
+        if key in ENVIRONMENTS[env_id] and ENVIRONMENTS[env_id][key]:
+            return ENVIRONMENTS[env_id][key]
+        if default_value is not None:
+            return default_value
+        if (
+            INTENT_MAP_KEY in ENVIRONMENTS[DEFAULT_ID]
+            and intent in ENVIRONMENTS[DEFAULT_ID][INTENT_MAP_KEY]
+            and key in ENVIRONMENTS[DEFAULT_ID][INTENT_MAP_KEY][intent]
+        ):
+            return ENVIRONMENTS[DEFAULT_ID][INTENT_MAP_KEY][intent][key]
+        if key in ENVIRONMENTS[DEFAULT_ID]:
+            return ENVIRONMENTS[DEFAULT_ID][key]
+        return None
+
+    def _env_default_template(self, key, env_id, intent, **kwargs):
+        kwargs["site_id"] = self.site_id
+        kwargs["site_domain"] = self.site_domain
+
+        val = self._env_default(key, env_id, intent, None)
+        if val is not None:
+            return val
+        tpl_key = key + "_template"
+        # Look for config matching env_id and intent
+        if (
+            INTENT_MAP_KEY in ENVIRONMENTS[env_id]
+            and intent in ENVIRONMENTS[env_id][INTENT_MAP_KEY]
+            and tpl_key in ENVIRONMENTS[env_id][INTENT_MAP_KEY][intent]
+        ):
+            return ENVIRONMENTS[env_id][INTENT_MAP_KEY][intent][tpl_key].format(
+                env_id=env_id, **kwargs
+            )
+        # Look for config matching env_id
+        if tpl_key in ENVIRONMENTS[env_id] and ENVIRONMENTS[env_id][tpl_key]:
+            return ENVIRONMENTS[env_id][tpl_key].format(env_id=env_id, **kwargs)
+
+        # Look for default config matching intent
+        if (
+            INTENT_MAP_KEY in ENVIRONMENTS[DEFAULT_ID]
+            and intent in ENVIRONMENTS[DEFAULT_ID][INTENT_MAP_KEY]
+            and tpl_key in ENVIRONMENTS[DEFAULT_ID][INTENT_MAP_KEY][intent]
+        ):
+            return ENVIRONMENTS[DEFAULT_ID][INTENT_MAP_KEY][intent][tpl_key].format(
+                env_id=env_id, **kwargs
+            )
+        # Look for default config
+        if tpl_key in ENVIRONMENTS[DEFAULT_ID] and ENVIRONMENTS[DEFAULT_ID][tpl_key]:
+            return ENVIRONMENTS[DEFAULT_ID][tpl_key].format(env_id=env_id, **kwargs)
+        return ENVIRONMENTS[DEFAULT_ID][key]
+
+    # Static methods
+    @staticmethod
+    def _hash_number(s, max_num=1000):
+        """Hash a string to a number in [0, max_num)
+        >>> _hash_number("hello world", 8)
+        '3'"""
+        max_num_bits = math.ceil(math.log2(max_num))
+        hash_object = hashlib.sha512()
+        max_digest_bits = hash_object.digest_size * 8
+        if max_num_bits > max_digest_bits:
+            errxit(
+                f"max_num {max_num} ({max_num_bits} bits) exceeds digest_size {max_digest_bits} bits"
+            )
+        hash_object.update(s.encode())
+        hash_num = int(hash_object.hexdigest(), 16) % max_num
+        return hash_num
+
+
+class SiteConfigs:
+    def __init__(
+        self,
+        root_dir,
+        docker_root_dir,
+        modules_root_dir,
+        site_dirs,
+        content_path,
+        verbose,
+        debug,
+    ):
+        self.root_dir = root_dir
+        self.docker_root_dir = docker_root_dir
+        self.modules_root_dir = modules_root_dir
+        self.site_dirs = site_dirs
+        self.content_path = content_path
+        self.verbose = verbose
+        self.debug = debug
+
+        # Create config for all enabled sites for all their enabled environments
+        self.sites = self.load_env_files()
+        self.write_env_files()
+
+    def load_env_files(self):
+        sites = {}
+        docker_compose_local_env = {}
+        docker_env_file_path = Path(
+            self.docker_root_dir / SUBPATHS["docker_override_file"]
+        )
+        if docker_env_file_path.is_file():
+            vrb(f"Loading '{docker_env_file_path}'")
+            docker_compose_local_env.update(self._parse_env_file(docker_env_file_path))
+
+        for site_dir in self.site_dirs:
+            site_id = site_dir.name
+
+            site_config = SiteEnvironmentConfigs(
+                self.root_dir,
+                self.modules_root_dir,
+                self.content_path,
+                docker_compose_local_env,
+                site_dir,
+                site_id,
+                self.verbose,
+                self.debug,
+            )
+
+            # Merged and enhanced env file for Docker compose
+            # Note: one Docker instance per site, hence one `.env` file for `docker compose` covering all runtime environments such as `devel`, `stage`, `prod`
+            site_config.config["docker_compose_values_file"] = (
+                site_dir / SUBPATHS["docker_compose_values_file"]
+            )
+
+            sites[site_id] = site_config
+
+        return sites
+
+    def write_env_files(self):
+        for site in self.sites.values():
+            SiteConfigs._write_env_file(
+                site.config["docker_compose_values_file"],
+                site.docker_compose_values,
+            )
+
+    @staticmethod
+    def _parse_env_file(env_file_path, prefix=""):
+        # This method parses an environment file and returns a dictionary of key-value pairs
+        # Based on package `dotenv``
+        env = {}
+        with open(env_file_path, "r") as env_file:
+            for line in env_file:
+                # Strip whitespace and ignore empty lines and lines starting with #
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+
+                # Use regex to find the first occurrence of '=' or ':'
+                match = re.search(r"[=:]", line)
+                if not match:
+                    continue  # Skip the line if no key-value delimiter is found
+
+                # Split line into key and value at the first occurrence of '=' or ':'
+                split_index = match.start()
+                key = line[:split_index].strip()
+                value = line[split_index + 1 :].strip()
+
+                # Handle quoted values
+                if (value.startswith('"') and value.endswith('"')) or (
+                    value.startswith("'") and value.endswith("'")
+                ):
+                    value = value[1:-1]
+
+                if not key.startswith(prefix):
+                    key = f"{prefix}{key}"
+                env[key] = value
+
+        return env
+
+    @staticmethod
+    def _write_env_file(env_file_path, env, prefix=""):
+        try:
+            env_file_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(env_file_path, "w") as env_file:
+                for key, val in env.items():
+                    env_file.write(f"{prefix}{key}={val}\n")
+        except FileNotFoundError as e:
+            wrn(f"Failed to write env file to '{env_file_path}': {str(e)}")
+
+
+class SiteController:
+    def __init__(self, controller_config):
+        self.root_dir = controller_config["root_dir"]
+        self.docker_root_dir = controller_config["docker_root_dir"]
+        self.modules_root_dir = controller_config["modules_root_dir"]
+        self.site_dirs = controller_config["site_dirs"]
+        self.env_ids = controller_config["env_ids"]
+        self.service_names = controller_config["service_names"]
+        self.content_path = controller_config["content_path"]
+        self.verbose = controller_config["verbose"]
+        self.debug = controller_config["debug"]
+        self.loglevel = controller_config["loglevel"]
+        self.dry_run = controller_config["dry_run"]
+
+        # Use a giant dict to capture and manipulate all configuration values
+        self.site_configs = SiteConfigs(
+            self.root_dir,
+            self.docker_root_dir,
+            self.modules_root_dir,
+            self.site_dirs,
+            self.content_path,
+            self.verbose,
+            self.debug,
+        )
+
+        # Note: Controlling caddy via API is not necessary given that we can pass the
+        # hostname for TLS via environment variables into Caddyfile
+        # self.caddy_controller = CaddyServerController(self.site_configs)
+
+    def run_verb(self, controller_verb):
+        vrb(
+            f"SiteController.run_verb('{self.root_dir}', {controller_verb})\n    Sites: {self.site_configs.sites.keys()}"
+        )
+        # Determine intent of verb to set up the proper environment
+        # Find the intent for the given controller verb
+        for intent, verbs in CONTROLLER_VERBS.items():
+            if controller_verb not in verbs:
+                continue
+            site_verbs = verbs[controller_verb]["site_verbs"]
+            # Iterate over sites and site verbs
+            for site_id in self.site_configs.sites:
+                for site_verb in site_verbs:
+                    attach_logs, stdout, stderr = self.run_site_verb(site_id, site_verb)
+                    vrb(stdout, stderr)
+                    vrb(
+                        f"### run_verb intent={intent} controller_verb={controller_verb} site_id={site_id} site_verb={site_verb} DONE ###"
+                    )
+                    return attach_logs
+
+    def run_site_verb(self, site_id, site_verb):
+        attach_logs, stdout, stderr = False, "", ""
+        vrb(f"SiteController.run_site_verb({site_id}, {site_verb})")
+        if site_verb in ["init"]:
+            self._ifconfig_alias(site_id, "up")
+        elif site_verb in ["up", "start", "restart", "run"]:
+            self._ifconfig_alias(site_id, "up")
+            if site_verb in ["start", "restart"]:
+                # Ensure all containers are up
+                self._docker_compose(site_id, "up")
+            attach_logs, stdout, stderr = self._docker_compose(site_id, site_verb)
+        elif site_verb in ["down", "stop"]:
+            if site_verb in ["down"]:
+                self._ifconfig_alias(site_id, "down")
+            attach_logs, stdout, stderr = self._docker_compose(site_id, site_verb)
+        elif site_verb in ["logs"]:
+            attach_logs, stdout, stderr = self._docker_compose(site_id, site_verb)
+        elif site_verb in ["processes"]:
+            attach_logs, stdout, stderr = self._docker_compose(site_id, site_verb)
+        elif site_verb in ["shell"]:
+            attach_logs, stdout, stderr = self._docker_compose(site_id, site_verb)
+        else:
+            errxit(f"Invalid site verb: {site_verb}")
+        vrb(f"### run_site_verb site_id={site_id} site_verb={site_verb} DONE ###")
+
+        return attach_logs, stdout, stderr
+
+    # --- Private methods
+    def _docker_compose(self, site_id, verb):
+        # Determine intent
+        intent = SiteController._get_verb_intent(verb)
+        #
+        # Construct command line for `docker compose` based on definition
+        # of verb
+        VERB_DEFINITION = DOCKER_COMPOSE["verb"][verb]
+        attach_logs = (
+            "attach_logs" in VERB_DEFINITION and VERB_DEFINITION["attach_logs"]
+        )
+
+        # If this verb applies only to a filtered list of services, get all matching services
+        matching_services = []
+        if "filter" in VERB_DEFINITION:
+            matching_services = self._get_site_services_matching_filter(
+                site_id,
+                VERB_DEFINITION["filter"],
+            )
+
+        # Add docker compose main comman, e.g., `up` or `restart`
+        cmd = VERB_DEFINITION["command"]
+
+        # If command is restart but no services are running, ensure all containers are up
+        # if cmd == "restart" and not matching_services:
+        #     self._docker_compose(site_id, "up")
+
+        # Most docker compose verbs accept multiple services
+        if ("accept_services" not in VERB_DEFINITION) or (
+            VERB_DEFINITION["accept_services"] == "multi"
+        ):
+            for env_id in self.env_ids:
+                env_intent = SiteController._get_env_intent_config(env_id, intent)
+                env_service_names = []
+                if "service_names" in env_intent:
+                    for service_name in env_intent["service_names"]:
+                        if self.service_names and not re.match(
+                            "|".join(
+                                [
+                                    re.escape(service_id)
+                                    for service_id in self.service_names
+                                ]
+                            ),
+                            service_name,
+                        ):
+                            continue
+                        if matching_services and service_name not in matching_services:
+                            continue
+                        env_service_names.append(
+                            self._get_service_name(env_id, service_name)
+                        )
+
+                    stdout, stderr = self._run_docker_compose_cmd(
+                        site_id,
+                        cmd,
+                        VERB_DEFINITION["options"],
+                        env_service_names,
+                        VERB_DEFINITION["check"],
+                    )
+
+        else:
+            # Otherwise, the docker compoose verb acccepts a single or no services
+            if VERB_DEFINITION["accept_services"] == "single":
+                for env_id in self.env_ids:
+                    env_intent = SiteController._get_env_intent_config(env_id, intent)
+                    if "service_names" in env_intent:
+                        for service_name in env_intent["service_names"]:
+                            if self.service_names and not re.match(
+                                "|".join(
+                                    [
+                                        re.escape(service_id)
+                                        for service_id in self.service_names
+                                    ]
+                                ),
+                                service_name,
+                            ):
+                                continue
+                            env_service_names = [
+                                self._get_service_name(env_id, service_name)
+                            ]
+                            stdout, stderr = self._run_docker_compose_cmd(
+                                site_id,
+                                cmd,
+                                VERB_DEFINITION["options"],
+                                env_service_names,
+                                VERB_DEFINITION["check"],
+                            )
+
+            else:
+                stdout, stderr = self._run_docker_compose_cmd(
+                    site_id,
+                    cmd,
+                    VERB_DEFINITION["options"],
+                    [],
+                    VERB_DEFINITION["check"],
+                )
+
+        if (
+            "show_service_URL" in VERB_DEFINITION
+            and VERB_DEFINITION["show_service_URL"]
+        ):
+            for env_id in self.env_ids:
+                # Get environment variable which contains Hugo base URL for specific
+                # environment and intent, e.g., `DEVEL_SERVE_HUGO_BASE_URL``
+                prefix = f"{env_id.upper()}_{intent.upper()}_"
+                site_env = self.site_configs.sites[site_id].docker_compose_values
+                print(f"{site_id}[{env_id}] at {site_env[f'{prefix}HUGO_BASE_URL']}")
+
+        return attach_logs, stdout, stderr
+
+    def _get_service_name(self, env_id, service_name):
+        return f"{env_id}_{service_name}"
+
+    def _process_arg_templates(self, template, arg_values):
+        # Process the template string for the command: replace any placeholder in braces,
+        # e.g., `{filter}`,` with the corresponding value from `arg_values`, e.g.,
+        # `{"filter": {}"status": "running"}}`
+        def format_arg(key, value):
+            if isinstance(value, dict):
+                return " ".join(f"{k}='{v}'" for k, v in value.items())
+            return value
+
+        formatted_arg_values = {k: format_arg(k, v) for k, v in arg_values.items()}
+        args = [item.format(**formatted_arg_values) for item in template]
+        return args
+
+    def _get_site_services_matching_filter(self, site_id, arg_values):
+        """Get list of running containers for given site_id"""
+        compose_command = "ps"
+        arg_templates = [
+            "--all",
+            "--no-trunc",
+            "--format",
+            "json",
+            "--filter",
+            "{filter}",
+        ]
+        stdout, stderr = self._run_docker_compose_cmd(
+            site_id, compose_command, arg_templates, [], filter=arg_values
+        )
+        if stdout:
+            # Decode the stdout bytes to a string and split it into lines
+            stdout_lines = stdout.decode().strip().split("\n")
+
+            # Parse each line as JSON
+            running_services = [
+                json.loads(line) for line in stdout_lines if line.strip()
+            ]
+            return running_services
+        return []
+
+    def _run_docker_compose_cmd(
+        self,
+        site_id,
+        compose_command,
+        arg_templates,
+        service_names,
+        check=False,
+        **arg_values,
+    ):
+        cmd = DOCKER_COMPOSE["cmd"].copy()
+        if self.loglevel <= logging.INFO:
+            cmd += DOCKER_COMPOSE["common_opts_verbose"]
+
+        cmd += [
+            *DOCKER_COMPOSE["common_opts_compose_project_name"],
+            COMPOSE_PROJECT_PREFIX + site_id.replace(".", "-"),
+        ]
+        cmd += [
+            *DOCKER_COMPOSE["common_opts_compose_file"],
+            (self.docker_root_dir / FILENAMES["docker_compose"]).as_posix(),
+        ]
+        cmd += [
+            *DOCKER_COMPOSE["common_opts_env_file"],
+            self.site_configs.sites[site_id]
+            .config["docker_compose_values_file"]
+            .as_posix(),
+        ]
+
+        compose_args = self._process_arg_templates(arg_templates, arg_values)
+        cmd += [compose_command] + compose_args + service_names
+        try:
+            stdout, stderr = self._run_cmd_output(cmd, check)
+
+            return stdout, stderr
+        except TypeError:
+            return "", ""
+
+    async def _read_stream(self, stream, cb):
+        while True:
+            line = await stream.readline()
+            if line:
+                cb(line.decode())  # Process the line (e.g., print it)
+            else:
+                break
+
+    async def _stream_subprocess(self, cmd, env, cwd):
+        process = await asyncio.create_subprocess_exec(
+            *cmd, env=env, cwd=cwd, stdout=PIPE, stderr=PIPE
+        )
+
+        vrb(f"Process ID PID={process.pid}")
+
+        # Read stdout and stderr concurrently
+        await asyncio.gather(
+            self._read_stream(
+                process.stdout, lambda x: print(x, end="")
+            ),  # Print stdout lines
+            self._read_stream(
+                process.stderr, lambda x: print(x, end="")
+            ),  # Print stderr lines
+        )
+
+        return await process.wait()  # Wait for the subprocess exit
+
+    def _run_cmd_output(self, cmd, check=True, cwd=None, add_env=None):
+        if not add_env:
+            add_env = {}
+        if not cwd:
+            cwd = self.root_dir
+        cmd_out = "' '".join(cmd)
+        cwd_out = cwd.resolve().as_posix()
+        env_out = "\n".join([f"{k}='{v}'" for k, v in add_env.items()])
+        log_prefix = (
+            f"_run_cmd_output(check={check}):\ncd '{cwd_out}'\n{env_out}\n'{cmd_out}'"
+        )
+        dbg(
+            log_prefix,
+            relative_paths=False,
+        )
+        if self.dry_run:
+            return 0
+        if add_env:
+            env = {**os.environ, **add_env}
+        else:
+            env = os.environ
+
+        async def main():
+            process_return_code = await self._stream_subprocess(cmd, env, cwd)
+
+            if process_return_code == 0:
+                return
+            error_msg = f"Command '{cmd}' exited with return code {process_return_code}"
+
+            if check:
+                errxit(error_msg)
+            else:
+                wrn(error_msg)
+
+        try:
+            asyncio.run(main())
+        except KeyboardInterrupt:
+            pass
+
+    def _routing_iface_address(self, dest_addr):
+        """Return the IPv4 address of the default route to the
+        given destination address"""
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect((dest_addr.compressed, 80))
+            return ipaddress.IPv4Address(s.getsockname()[0])
+
+    def _routing_iface(self, dest_addr):
+        output = subprocess.check_output(
+            ["route", "get", dest_addr.compressed], universal_newlines=True
+        )
+        iface_re = r"\binterface:\s*([^\s]+)\b"
+        for line in output.splitlines():
+            match = re.match(iface_re, line.strip())
+            if match is not None and match.groups(1):
+                return match.groups(1)[0]
+
+    def _default_iface_state(self):
+        iface_name = self._routing_iface(DEFAULT_IFACE_LOOKUP_ADDR)
+        iface_addr = self._routing_iface_address(DEFAULT_IFACE_LOOKUP_ADDR)
+        return iface_name, iface_addr
+
+    def _loopback_iface_state(self):
+        iface_name = self._routing_iface(LOOPBACK_IFACE_LOOKUP_ADDR)
+        iface_addr = self._routing_iface_address(LOOPBACK_IFACE_LOOKUP_ADDR)
+        return iface_name, iface_addr
+
+    def _alias_iface_params(
+        self, addr: ipaddress.IPv4Address
+    ) -> Tuple[ipaddress.IPv4Address, str, str]:
+        if addr.is_loopback:
+            return (*self._loopback_iface_state(), LOOPBACK_IFACE_ALIAS_NETMASK)
+        return (*self._default_iface_state(), DEFAULT_IFACE_ALIAS_NETMASK)
+
+    def _ifconfig_alias(self, site_id, verb):
+        site_env = self.site_configs.sites[site_id].docker_compose_values
+
+        # Determine intent
+        intent = SiteController._get_verb_intent(verb)
+        for env_id in self.env_ids:
+            env_intent_prefix = f"{env_id.upper()}_{intent.upper()}_"
+            for addr_key in [
+                f"{env_intent_prefix}{key}"
+                for key in ["HUGO_SERVER_ADDR", "CADDY_SERVER_ADDR"]
+            ]:
+                if addr_key in site_env:
+                    addr_str = site_env[addr_key]
+                    if addr_str != DEFAULT_SERVICE_BIND_ADDRESS:
+                        addr = ipaddress.IPv4Address(addr_str)
+                        iface_name, iface_addr, netmask = self._alias_iface_params(addr)
+                        if addr.compressed != iface_addr.compressed:
+                            cmd = IFCONFIG_ALIAS["cmd"].copy()
+                            args = [
+                                item
+                                for sublist in IFCONFIG_ALIAS["verb"][verb]["template"]
+                                for item in sublist.format(
+                                    iface=iface_name,
+                                    addr=addr.compressed,
+                                    netmask=netmask,
+                                ).split(r"\x00")
+                            ]
+                            self._run_cmd(
+                                cmd + args, IFCONFIG_ALIAS["verb"][verb]["check"]
+                            )
+
+    def _run_cmd(self, cmd, check=True, cwd=None, add_env=None):
+        if not add_env:
+            add_env = {}
+        if not cwd:
+            cwd = self.root_dir
+        cmd_out = "' '".join(cmd)
+        cwd_out = cwd.resolve().as_posix()
+        env_out = "\n".join([f"{k}='{v}'" for k, v in add_env.items()])
+        dbg(
+            f"run_cmd(check={check}):\ncd '{cwd_out}'\n{env_out}\n'{cmd_out}'",
+            relative_paths=False,
+        )
+        if self.dry_run:
+            return 0
+        if add_env:
+            env = {**os.environ, **add_env}
+        else:
+            env = os.environ
+
+        async def main():
+            process: Process = await asyncio.create_subprocess_exec(
+                *cmd, env=env, cwd=cwd
+            )
+            vrb(f"Process ID PID={process.pid}")
+            ret = await process.wait()
+            if ret != 0:
+                if check:
+                    errxit(
+                        f"run_cmd(check={check}):\ncd '{cwd_out}'\n{env_out}\n'{cmd_out}'"
+                    )
+                else:
+                    wrn(
+                        f"run_cmd(check={check}):\ncd '{cwd_out}'\n{env_out}\n'{cmd_out}'"
+                    )
+
+        try:
+            asyncio.run(main())
+        except KeyboardInterrupt:
+            pass
+
+    # Static methods
+    @staticmethod
+    def _get_verb_intent(verb):
+        for intent in CONTROLLER_VERBS.keys():
+            if verb in CONTROLLER_VERBS[intent]:
+                return intent
+        errxit("Invalid verb: {verb}")
+
+    @staticmethod
+    def _get_env_intent_config(env_id, intent):
+        env_intent_config = copy.deepcopy(ENVIRONMENTS[DEFAULT_ID])
+
+        for cand_env_id in [DEFAULT_ID, env_id]:
+            if cand_env_id in ENVIRONMENTS:
+                env_intent_config.update(ENVIRONMENTS[cand_env_id])
+            if (
+                INTENT_MAP_KEY in ENVIRONMENTS[cand_env_id]
+                and intent in ENVIRONMENTS[cand_env_id][INTENT_MAP_KEY]
+            ):
+                env_intent_config.update(
+                    ENVIRONMENTS[cand_env_id][INTENT_MAP_KEY][intent]
+                )
+
+        # Create a new dictionary excluding the 'intent' key
+        env_intent_config_without_intent = {
+            k: v for k, v in env_intent_config.items() if k != INTENT_MAP_KEY
+        }
+        return env_intent_config_without_intent
+
+    @staticmethod
+    def _extract_domain(text):
+        pattern = r"(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}"
+        match = re.search(pattern, text)
+        return match.group(0) if match else None
+
+
+def get_verbs_and_aliases(selected_verbs=None):
+    verbs_and_aliases = []
+    for intent_verbs in CONTROLLER_VERBS.values():
+        for canonical_verb, verb_details in intent_verbs.items():
+            if not selected_verbs or canonical_verb in selected_verbs:
+                # Add the verb itself
+                verbs_and_aliases.append(canonical_verb)
+                # Add aliases if they exist
+                if "aliases" in verb_details:
+                    verbs_and_aliases.extend(verb_details["aliases"])
+
+    return sorted(list(set(verbs_and_aliases)))
+
+
+def get_canonical_verbs(verbs_and_aliases):
+    # Map for quickly finding the canonical verb for an alias
+    alias_to_canonical = {}
+    for intent_verbs in CONTROLLER_VERBS.values():
+        for canonical_verb, details in intent_verbs.items():
+            alias_to_canonical[canonical_verb] = canonical_verb
+            if "aliases" in details:
+                for alias in details["aliases"]:
+                    alias_to_canonical[alias] = canonical_verb
+
+    # Build a list of canonical verbs maintaining the original order
+    canonical_verbs_ordered = []
+    seen_canonical = set()
+    for verb_or_alias in verbs_and_aliases:
+        canonical_verb = alias_to_canonical.get(verb_or_alias)
+        if canonical_verb and canonical_verb not in seen_canonical:
+            canonical_verbs_ordered.append(canonical_verb)
+            seen_canonical.add(canonical_verb)
+
+    return canonical_verbs_ordered
+
+
+def parse_arguments():
+    import argparse
+
+    #
+    # Initialize default values required to print help text
+    #
+
+    SCRIPT_PARENT_PATH = SCRIPT_PATH.parent
+
+    SERVE_ROOT_DIR = SCRIPT_PARENT_PATH
+    DEFAULT_DOCKER_ROOT_DIR = (SERVE_ROOT_DIR / SUBPATHS["docker"]).resolve()
+
+    HUGO_ROOT_DIR = SCRIPT_PARENT_PATH.parent
+    DEFAULT_MODULES_ROOT_DIR = (HUGO_ROOT_DIR / SUBPATHS["modules"]).resolve()
+    DEFAULT_SITES_ROOT_DIR = (HUGO_ROOT_DIR / SUBPATHS["sites"]).resolve()
+
+    # A valid site directory is a direct descendant of `arg.sites_dir` that contains
+    # a directory named DIRECTORIES["local"]
+    DEFAULT_SITE_DIRS = [
+        d
+        for d in DEFAULT_SITES_ROOT_DIR.iterdir()
+        if d.is_dir()
+        and d.name not in DIRECTORIES.values()
+        and any((d.is_dir() and d.name == DIRECTORIES["local"]) for d in d.iterdir())
+    ]
+
+    # Enumerate all valid environments except hidden ones
+    # (by Hugo convention: those with names starting with `_`)
+    VALID_ENV_IDS = [
+        env_id for env_id in ENVIRONMENTS.keys() if not env_id.startswith("_")
+    ]
+
+    # Extract and merge verbs and their aliases from `CONTROLLER_VERBS`
+    VALID_VERBS_AND_ALIASES = get_verbs_and_aliases()
+    global_verbs = get_verbs_and_aliases(["processes", "stop", "down"])
+
+    # Extract service_names from `ENVIRONMENTS`
+    VALID_SERVICE_NAMES = [
+        service_name
+        for intent in ENVIRONMENTS[DEFAULT_ID][INTENT_MAP_KEY].values()
+        for service_name in intent["service_names"]
+    ]
+
+    #
+    # Parse command line arguments
+    #
+
+    parser = argparse.ArgumentParser(description="Hugo server controller")
+    parser.add_argument(
+        "--root-dir", "-r", type=Path, default=SERVE_ROOT_DIR, help="Root dir"
+    )
+    parser.add_argument(
+        "--docker-dir",
+        type=Path,
+        default=DEFAULT_DOCKER_ROOT_DIR,
+        help="Docker compose dir",
+    )
+    parser.add_argument(
+        "--modules-dir",
+        type=Path,
+        default=DEFAULT_MODULES_ROOT_DIR,
+        help="Parent dir for Go modules, .e.g, themes",
+    )
+    parser.add_argument(
+        "--sites-dir",
+        type=Path,
+        default=DEFAULT_SITES_ROOT_DIR,
+        help="Site root directory: the parent directory of all site directories",
+    )
+    parser.add_argument(
+        "--content-path",
+        type=Path,
+        default=None,
+        help="Prefix path to only render a sub directory of Hugo's content directory -- applies only if the intent is `serve`",
+    )
+    parser.add_argument(
+        "--site",
+        "-s",
+        action="extend",
+        nargs=1,
+        help=f"Sites (one or more of {[d.name for d in DEFAULT_SITE_DIRS]}",
+    )
+    parser.add_argument(
+        "--env",
+        "-e",
+        action="extend",
+        nargs=1,
+        help=f"Environments (one or more of {VALID_ENV_IDS}",
+    )
+    parser.add_argument(
+        "--verb",
+        action="extend",
+        nargs=1,
+        help=f"Verbs (one or more of {VALID_VERBS_AND_ALIASES}",
+    )
+    parser.add_argument(
+        "--service",
+        action="extend",
+        nargs=1,
+        help=f"Services: substring of any of {VALID_SERVICE_NAMES}",
+    )
+    parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
+    parser.add_argument("--debug", action="store_true", help="Debug output")
+    parser.add_argument(
+        "--dry-run",
+        "-n",
+        action="store_true",
+        help="Only output commands without actually running them",
+    )
+
+    parser.add_argument(
+        "arguments",
+        type=str,
+        nargs="*",
+        default=None,
+        help="verb, environments and sites to apply verb to (default: verb=restart, site=current directory, environment=devel)",
+    )
+
+    args = parser.parse_args()
+
+    loglevel = logging.ERROR
+    if args.debug:
+        loglevel = logging.DEBUG
+    elif args.verbose:
+        loglevel = logging.INFO
+    initialize_logging(loglevel)
+
+    dbg(f"SCRIPT_PARENT_PATH='{SCRIPT_PARENT_PATH}'")
+    dbg(f"root_dir='{args.root_dir}'")
+    dbg(f"docker_dir='{args.docker_dir}'")
+    dbg(f"modules_dir='{args.modules_dir}'")
+    dbg(f"sites_dir='{args.sites_dir}'")
+    dbg(f"content_path='{args.content_path}'")
+    dbg(f"service='{args.service}'")
+
+    root_dir = Path(args.root_dir).resolve()
+    docker_root_dir = Path(args.docker_dir).resolve()
+    modules_root_dir = Path(args.modules_dir).resolve()
+
+    # A valid site directory is a direct descendant of `args.sites_dir` that contains
+    # a directory named DIRECTORIES["local"]
+
+    available_site_dirs = [
+        site_dir
+        for site_dir in args.sites_dir.iterdir()
+        if site_dir.is_dir()
+        and SiteController._extract_domain(site_dir.name)
+        and site_dir.name not in DIRECTORIES.values()
+        and any(
+            (sub_dir.is_dir() and sub_dir.name == DIRECTORIES["hugo_content"])
+            for sub_dir in site_dir.iterdir()
+        )
+    ]
+
+    selected_service_names = []
+    if args.service:
+        selected_service_names = args.service
+
+    #
+    # Process remaining arguments
+    #
+
+    # Interpret arguments as verb such as `stop,start`, then environment such as `devel` or `prod`,
+    # then use the remaining ones as site identifier patterns
+    remaining_arguments = args.arguments
+
+    # Default to restart services
+    selected_verbs = ["restart"]
+
+    if remaining_arguments:
+        verbs_and_aliases = [
+            arg for arg in remaining_arguments if arg in VALID_VERBS_AND_ALIASES
+        ]
+        if verbs_and_aliases:
+            remaining_arguments = [
+                arg for arg in remaining_arguments if arg not in verbs_and_aliases
+            ]
+            selected_verbs = get_canonical_verbs(verbs_and_aliases)
+
+    selected_env_ids = []
+    if args.env:
+        # [item for sublist in list for item in sublist]]
+        env_ids = [env_id for ids in args.env for env_id in re.findall(r"[^,]+", ids)]
+    else:
+        env_ids = []
+
+    if env_ids and len(env_ids) > 0:
+        selected_env_ids = env_ids
+        dbg(
+            f"Selecting environments {selected_env_ids} based on the value '{args.env}' of option '-e | --env'"
+        )
+    elif remaining_arguments:
+        selected_env_ids = [arg for arg in remaining_arguments if arg in VALID_ENV_IDS]
+        remaining_arguments = [
+            arg for arg in remaining_arguments if arg not in selected_env_ids
+        ]
+        dbg(
+            f"Selecting environments {selected_env_ids} based on {'some' if remaining_arguments else 'all'} of the arguments {args.arguments}"
+        )
+    if not selected_env_ids:
+        # If any of the verbs is global, default to all environments, otherwise only the first
+        verbs_in_global_verbs = set(selected_verbs).intersection(global_verbs)
+        if verbs_in_global_verbs:
+            selected_env_ids = VALID_ENV_IDS
+            dbg(
+                f"Selecting all environments {selected_env_ids} since one of the selected verbs {selected_verbs} is considered global"
+            )
+        else:
+            selected_env_ids = [VALID_ENV_IDS[0]]
+            dbg(
+                f"Selecting environment {selected_env_ids} as the first among the valid environments {VALID_ENV_IDS}"
+            )
+
+    #
+    # A `site_dir` is the root directory of a specific site,
+    # e.g. `~/hugo/sites/example.com`
+    #
+    # We determine, which web sites to consider among the child directories of `site_root_dir`,
+    # e.g. `~/hugo/sites, based on:
+    # 1. Option `--site`
+    # 2. Arguments (i.e., not options) in `remaining_arguments`
+    # 3. Name of the current directory, if it is a valid site directory
+    # 4. Default: all valid site dirs
+
+    selected_site_dirs = []
+    selected_site_ids = []
+    site_ids_origin = ""
+    if args.site:
+        site_ids_origin = f"option `--site`: {args.site}"
+        selected_site_ids = args.site
+    elif remaining_arguments:
+        selected_site_ids = remaining_arguments
+        site_ids_origin = f"remaining arguments: {remaining_arguments}"
+
+    if not selected_site_ids:
+        cwd = Path(os.getcwd())
+        if cwd in available_site_dirs:
+            site_ids_origin = f"current directory name: {cwd.as_posix()}"
+            selected_site_dirs = [cwd]
+
+    if not selected_site_dirs and selected_site_ids:
+        # Add all elements of selected_site_ids to selected_site_dirs which are
+        # equal to or a substring of any element of valid_site_dirs
+        selected_site_dirs = [
+            site_dir
+            for site_dir in available_site_dirs
+            if any(
+                [
+                    re.match(re.escape(s), site_dir.name, flags=re.IGNORECASE)
+                    for s in selected_site_ids
+                ]
+            )
+        ]
+
+    if not selected_site_dirs:
+        # If all verbs are global, continue with all available site dirs.
+        # Otherwise, this is the end
+        for verb in selected_verbs:
+            if verb not in global_verbs:
+                errxit(
+                    "No site dir specified:\n"
+                    + f"--site: {args.site}\n"
+                    + f"remaining arguments: {remaining_arguments}\n"
+                )
+        selected_site_dirs = available_site_dirs
+
+    vrb(
+        f"Initializing SiteController('{root_dir}')\n"
+        + f"    Sites: {[site.name for site in selected_site_dirs]} based on {site_ids_origin}\n"
+        + f"    Environments: {selected_env_ids}"
+        + f"    Service names: {selected_service_names}"
+        + f"    Verbs: {selected_verbs}\n"
+    )
+
+    config = {
+        "root_dir": root_dir,
+        "docker_root_dir": docker_root_dir,
+        "modules_root_dir": modules_root_dir,
+        "site_dirs": selected_site_dirs,
+        "env_ids": selected_env_ids,
+        "service_names": selected_service_names,
+        "content_path": args.content_path,
+        "verbose": args.verbose,
+        "debug": args.debug,
+        "loglevel": loglevel,
+        "dry_run": args.dry_run,
+    }
+    return config, selected_verbs
+
+
+SCRIPT_PATH = Path(__file__).resolve()
+SCRIPT_NAME = SCRIPT_PATH.name
+
+if __name__ == "__main__":
+    config, verbs = parse_arguments()
+    controller = SiteController(config)
+
+    attach_logs = False
+    for verb in verbs:
+        attach_logs_for_verb = controller.run_verb(verb)
+        attach_logs = attach_logs or attach_logs_for_verb
+
+    if attach_logs:
+        controller.run_verb("logs")

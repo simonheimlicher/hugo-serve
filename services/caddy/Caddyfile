@@ -1,0 +1,20 @@
+{$CADDY_HOSTNAME}:80, {$CADDY_HOSTNAME}:443 {
+	file_server
+
+	tls internal
+
+	# Set caching headers for static assets
+	@static {
+		path *.css *.js *.gif *.png *.jpg *.jpeg *.webp *.svg *.woff *.woff2
+	}
+	header @static Cache-Control "public, max-age=31536000, immutable"
+
+	# Set a different cache policy for other content
+	@dynamic {
+		not path *.css *.js *.gif *.png *.jpg *.jpeg *.webp *.svg *.woff *.woff2
+	}
+	header @dynamic Cache-Control "public, max-age=0, must-revalidate"
+
+	# Enable compression
+	encode gzip
+}

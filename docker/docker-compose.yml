@@ -1,0 +1,407 @@
+version: "3.8"
+
+name: hugo_server_controller
+
+services:
+  devel_hugo_server:
+    container_name: ${SITE_ID}_${DEVEL_SERVE_ENV}_hugo_server
+
+    # IMPORTANT: Not all containers work the same.
+    # Some containers, e.g., `klakegg/hugo`, implicitly prepend `hugo`
+    # to the command, whereas others, e.g., `hugomods/hugo-exts`, do not
+    # We need to adapt the value of the key `command` accordingly
+    # Further to this, we need to append
+    #     `--liveReloadPort=${DEVEL_SERVE_HUGO_SERVER_PORT}`
+    # to ensure that the Hugo live reload websocket uses the same port
+    # as `hugo server`
+    image: ${IMAGE_HUGO_FULL}   # Hugo Modules and Node.js
+
+    env_file:
+      - ${GLOBAL_ENV_FILE:-/dev/null}   # Environment variables for container
+
+    ports:
+      - "${DEVEL_SERVE_HUGO_SERVER_ADDR}:${DEVEL_SERVE_HUGO_SERVER_PORT}:${DEVEL_SERVE_HUGO_SERVER_PORT}"
+    volumes:
+      - ${DEVEL_SERVE_HUGO_ROOT}:/src
+      - ${DEVEL_SERVE_HUGO_MODULES}:/modules
+      - ${DEVEL_SERVE_CONTENT}:/content
+      - ${DEVEL_SERVE_HUGO_CONF}:/config
+      - ${DEVEL_SERVE_CACHE}:/cache
+      - ${DEVEL_SERVE_DEST}:/destination
+    environment:
+      - LANG=en_US
+      - LANGUAGE=en_US
+      - LC_CTYPE=en_US.UTF-8
+      - LC_NUMERIC=de_CH.UTF-8
+      - LC_TIME=de_CH.UTF-8
+      - LC_COLLATE=de_CH.UTF-8
+      - LC_MONETARY=de_CH.UTF-8
+      - LC_MESSAGES=en_US.UTF-8
+      - LC_PAPER=de_CH.UTF-8
+      - LC_NAME=de_CH.UTF-8
+      - LC_ADDRESS=de_CH.UTF-8
+      - LC_TELEPHONE=de_CH.UTF-8
+      - LC_MEASUREMENT=de_CH.UTF-8
+      - LC_IDENTIFICATION=de_CH.UTF-8
+      - LC_ALL=de_CH.UTF-8
+      - TZ=Europe/Zurich
+      - HUGO_CACHEDIR=/cache
+      - HUGO_MODULE_WORKSPACE=${DEVEL_SERVE_HUGO_MODULE_WORKSPACE}
+    command:
+      - hugo
+      - server
+      # - --verbose
+      - --buildDrafts=${DEVEL_SERVE_HUGO_BUILD_DRAFTS}
+      - --buildExpired=${DEVEL_SERVE_HUGO_BUILD_EXPIRED}
+      - --buildFuture=${DEVEL_SERVE_HUGO_BUILD_FUTURE}
+      - --printPathWarnings=${DEVEL_SERVE_HUGO_PRINT_PATH_WARNINGS}
+      - --printI18nWarnings=${DEVEL_SERVE_HUGO_PRINT_I18N_WARNINGS}
+      - --disableFastRender
+      - --forceSyncStatic
+      # - --navigateToChanged
+      - --cleanDestinationDir
+      - --appendPort=false
+      - --contentDir=/content
+      - --configDir=/config
+      - --cacheDir=/cache
+      - --destination=/destination
+      - --environment=${DEVEL_SERVE_HUGO_ENV}
+      - --baseURL=${DEVEL_SERVE_HUGO_BASE_URL}
+      - --logLevel=${DEVEL_SERVE_HUGO_LOG_LEVEL}
+      - --bind=${DEVEL_SERVE_HUGO_SERVER_BIND}
+      - --port=${DEVEL_SERVE_HUGO_SERVER_PORT}
+      - --liveReloadPort=${DEVEL_SERVE_HUGO_SERVER_PORT}
+
+  # Services in TEST environment
+  test_hugo_server:
+    container_name: ${SITE_ID}_${TEST_SERVE_ENV}_hugo_server
+    image: ${IMAGE_HUGO_FULL}   # Hugo Modules and Node.js
+    env_file:
+      - ${GLOBAL_ENV_FILE:-/dev/null}   # Environment variables for container
+    volumes:
+      - ${TEST_SERVE_HUGO_ROOT}:/src
+      - ${TEST_SERVE_HUGO_MODULES}:/modules
+      - ${TEST_SERVE_CONTENT}:/content
+      - ${TEST_SERVE_HUGO_CONF}:/config
+      - ${TEST_SERVE_CACHE}:/cache
+      - ${TEST_SERVE_DEST}:/destination
+    environment:
+      - LANG=en_US
+      - LANGUAGE=en_US
+      - LC_CTYPE=en_US.UTF-8
+      - LC_NUMERIC=de_CH.UTF-8
+      - LC_TIME=de_CH.UTF-8
+      - LC_COLLATE=de_CH.UTF-8
+      - LC_MONETARY=de_CH.UTF-8
+      - LC_MESSAGES=en_US.UTF-8
+      - LC_PAPER=de_CH.UTF-8
+      - LC_NAME=de_CH.UTF-8
+      - LC_ADDRESS=de_CH.UTF-8
+      - LC_TELEPHONE=de_CH.UTF-8
+      - LC_MEASUREMENT=de_CH.UTF-8
+      - LC_IDENTIFICATION=de_CH.UTF-8
+      - LC_ALL=de_CH.UTF-8
+      - TZ=Europe/Zurich
+      - HUGO_CACHEDIR=/cache
+      - HUGO_MODULE_WORKSPACE=${TEST_SERVE_HUGO_MODULE_WORKSPACE}
+    command:
+      - hugo
+      - --watch
+      - --buildDrafts=${TEST_SERVE_HUGO_BUILD_DRAFTS}
+      - --buildExpired=${TEST_SERVE_HUGO_BUILD_EXPIRED}
+      - --buildFuture=${TEST_SERVE_HUGO_BUILD_FUTURE}
+      - --printPathWarnings=${TEST_SERVE_HUGO_PRINT_PATH_WARNINGS}
+      - --printI18nWarnings=${TEST_SERVE_HUGO_PRINT_I18N_WARNINGS}
+      - --forceSyncStatic
+      - --cleanDestinationDir
+      - --contentDir=/content
+      - --configDir=/config
+      - --cacheDir=/cache
+      - --destination=/destination
+      - --environment=${TEST_SERVE_HUGO_ENV}
+      - --baseURL=${TEST_SERVE_HUGO_BASE_URL}
+      - --logLevel=${TEST_SERVE_HUGO_LOG_LEVEL}
+
+  test_caddy_server:
+    image: ${IMAGE_CADDY_PRODUCTION}
+    env_file:
+      - ${GLOBAL_ENV_FILE:-/dev/null}   # Environment variables for container
+    container_name: ${SITE_ID}_${TEST_SERVE_ENV}_caddy_server
+    environment:
+      - CADDY_ADMIN=${TEST_SERVE_CADDY_SERVER_BIND}:2019
+      - CADDY_HOSTNAME=${TEST_SERVE_HOSTNAME}
+      # Suppress warning `failed to sufficiently increase receive buffer size`
+      - QUIC_GO_DISABLE_RECEIVE_BUFFER_WARNING=true
+    ports:
+      - "${TEST_SERVE_CADDY_SERVER_ADDR}:${TEST_SERVE_CADDY_SERVER_PORT}:80"
+      - "${TEST_SERVE_CADDY_SERVER_ADDR}:${TEST_SERVE_CADDY_SERVER_TLS_PORT}:443"
+      - "${TEST_SERVE_CADDY_SERVER_ADDR}:${TEST_SERVE_CADDY_SERVER_ADMIN_PORT}:2019"
+    volumes:
+      - ${TEST_SERVE_DEST}:/srv/
+      - ${TEST_SERVE_CADDY_SERVER_CONF}:/etc/caddy
+      - ${TEST_SERVE_CADDY_SERVER_STATE}:/config
+
+  test_hugo_build:
+    container_name: ${SITE_ID}_hugo_build_${TEST_DEPLOY_ENV}
+    image: ${IMAGE_HUGO_FULL}   # Hugo Modules and Node.js
+    env_file:
+      - ${GLOBAL_ENV_FILE:-/dev/null}   # Environment variables for container
+    volumes:
+      - ${TEST_DEPLOY_HUGO_ROOT}:/src
+      - ${TEST_DEPLOY_HUGO_MODULES}:/modules
+      - ${TEST_DEPLOY_CONTENT}:/content
+      - ${TEST_DEPLOY_HUGO_CONF}:/config
+      - ${TEST_DEPLOY_CACHE}:/cache
+      - ${TEST_DEPLOY_DEST}:/destination
+    environment:
+      - LANG=en_US
+      - LANGUAGE=en_US
+      - LC_CTYPE=en_US.UTF-8
+      - LC_NUMERIC=de_CH.UTF-8
+      - LC_TIME=de_CH.UTF-8
+      - LC_COLLATE=de_CH.UTF-8
+      - LC_MONETARY=de_CH.UTF-8
+      - LC_MESSAGES=en_US.UTF-8
+      - LC_PAPER=de_CH.UTF-8
+      - LC_NAME=de_CH.UTF-8
+      - LC_ADDRESS=de_CH.UTF-8
+      - LC_TELEPHONE=de_CH.UTF-8
+      - LC_MEASUREMENT=de_CH.UTF-8
+      - LC_IDENTIFICATION=de_CH.UTF-8
+      - LC_ALL=de_CH.UTF-8
+      - TZ=Europe/Zurich
+      - HUGO_CACHEDIR=/cache
+      - HUGO_MODULE_WORKSPACE=${TEST_DEPLOY_HUGO_MODULE_WORKSPACE}
+    command:
+      - hugo
+      - --buildDrafts=${TEST_DEPLOY_HUGO_BUILD_DRAFTS}
+      - --buildExpired=${TEST_DEPLOY_HUGO_BUILD_EXPIRED}
+      - --buildFuture=${TEST_DEPLOY_HUGO_BUILD_FUTURE}
+      - --printPathWarnings=${TEST_DEPLOY_HUGO_PRINT_PATH_WARNINGS}
+      - --printI18nWarnings=${TEST_SERVE_HUGO_PRINT_I18N_WARNINGS}
+      - --forceSyncStatic
+      - --cleanDestinationDir
+      - --contentDir=/content
+      - --configDir=/config
+      - --cacheDir=/cache
+      - --destination=/destination
+      - --environment=${TEST_DEPLOY_HUGO_ENV}
+      - --logLevel=${TEST_DEPLOY_HUGO_LOG_LEVEL}
+
+  # Services in STAGE environment
+  stage_hugo_server:
+    container_name: ${SITE_ID}_${STAGE_SERVE_ENV}_hugo_server
+    image: ${IMAGE_HUGO_FULL}   # Hugo Modules and Node.js
+    env_file:
+      - ${GLOBAL_ENV_FILE:-/dev/null}   # Environment variables for container
+    volumes:
+      - ${STAGE_SERVE_HUGO_ROOT}:/src
+      - ${STAGE_SERVE_HUGO_MODULES}:/modules
+      - ${STAGE_SERVE_CONTENT}:/content
+      - ${STAGE_SERVE_HUGO_CONF}:/config
+      - ${STAGE_SERVE_CACHE}:/cache
+      - ${STAGE_SERVE_DEST}:/destination
+    environment:
+      - LANG=en_US
+      - LANGUAGE=en_US
+      - LC_CTYPE=en_US.UTF-8
+      - LC_NUMERIC=de_CH.UTF-8
+      - LC_TIME=de_CH.UTF-8
+      - LC_COLLATE=de_CH.UTF-8
+      - LC_MONETARY=de_CH.UTF-8
+      - LC_MESSAGES=en_US.UTF-8
+      - LC_PAPER=de_CH.UTF-8
+      - LC_NAME=de_CH.UTF-8
+      - LC_ADDRESS=de_CH.UTF-8
+      - LC_TELEPHONE=de_CH.UTF-8
+      - LC_MEASUREMENT=de_CH.UTF-8
+      - LC_IDENTIFICATION=de_CH.UTF-8
+      - LC_ALL=de_CH.UTF-8
+      - TZ=Europe/Zurich
+      - HUGO_CACHEDIR=/cache
+      - HUGO_MODULE_WORKSPACE=${STAGE_SERVE_HUGO_MODULE_WORKSPACE}
+    command:
+      - hugo
+      - --watch
+      - --buildDrafts=${STAGE_SERVE_HUGO_BUILD_DRAFTS}
+      - --buildExpired=${STAGE_SERVE_HUGO_BUILD_EXPIRED}
+      - --buildFuture=${STAGE_SERVE_HUGO_BUILD_FUTURE}
+      - --printPathWarnings=${STAGE_SERVE_HUGO_PRINT_PATH_WARNINGS}
+      - --printI18nWarnings=${TEST_SERVE_HUGO_PRINT_I18N_WARNINGS}
+      - --forceSyncStatic
+      - --cleanDestinationDir
+      - --contentDir=/content
+      - --configDir=/config
+      - --cacheDir=/cache
+      - --destination=/destination
+      - --environment=${STAGE_SERVE_HUGO_ENV}
+      - --baseURL=${STAGE_SERVE_HUGO_BASE_URL}
+      - --logLevel=${STAGE_SERVE_HUGO_LOG_LEVEL}
+
+  stage_caddy_server:
+    image: ${IMAGE_CADDY_PRODUCTION}
+    env_file:
+      - ${GLOBAL_ENV_FILE:-/dev/null}   # Environment variables for container
+    container_name: ${SITE_ID}_${STAGE_SERVE_ENV}_caddy_server
+    environment:
+      - CADDY_ADMIN=${STAGE_SERVE_CADDY_SERVER_BIND}:2019
+      - CADDY_HOSTNAME=${STAGE_SERVE_HOSTNAME}
+      # Suppress warning `failed to sufficiently increase receive buffer size`
+      - QUIC_GO_DISABLE_RECEIVE_BUFFER_WARNING=true
+    ports:
+      - "${STAGE_SERVE_CADDY_SERVER_ADDR}:${STAGE_SERVE_CADDY_SERVER_PORT}:80"
+      - "${STAGE_SERVE_CADDY_SERVER_ADDR}:${STAGE_SERVE_CADDY_SERVER_TLS_PORT}:443"
+      - "${STAGE_SERVE_CADDY_SERVER_ADDR}:${STAGE_SERVE_CADDY_SERVER_ADMIN_PORT}:2019"
+    volumes:
+      - ${STAGE_SERVE_DEST}:/srv/
+      - ${STAGE_SERVE_CADDY_SERVER_CONF}:/etc/caddy
+      - ${STAGE_SERVE_CADDY_SERVER_STATE}:/config
+
+  stage_hugo_build:
+    container_name: ${SITE_ID}_hugo_build_${STAGE_DEPLOY_ENV}
+    image: ${IMAGE_HUGO_FULL}   # Hugo Modules and Node.js
+    env_file:
+      - ${GLOBAL_ENV_FILE:-/dev/null}   # Environment variables for container
+    volumes:
+      - ${STAGE_DEPLOY_HUGO_ROOT}:/src
+      - ${STAGE_DEPLOY_HUGO_MODULES}:/modules
+      - ${STAGE_DEPLOY_CONTENT}:/content
+      - ${STAGE_DEPLOY_HUGO_CONF}:/config
+      - ${STAGE_DEPLOY_CACHE}:/cache
+      - ${STAGE_DEPLOY_DEST}:/destination
+    environment:
+      - LANG=en_US
+      - LANGUAGE=en_US
+      - LC_CTYPE=en_US.UTF-8
+      - LC_NUMERIC=de_CH.UTF-8
+      - LC_TIME=de_CH.UTF-8
+      - LC_COLLATE=de_CH.UTF-8
+      - LC_MONETARY=de_CH.UTF-8
+      - LC_MESSAGES=en_US.UTF-8
+      - LC_PAPER=de_CH.UTF-8
+      - LC_NAME=de_CH.UTF-8
+      - LC_ADDRESS=de_CH.UTF-8
+      - LC_TELEPHONE=de_CH.UTF-8
+      - LC_MEASUREMENT=de_CH.UTF-8
+      - LC_IDENTIFICATION=de_CH.UTF-8
+      - LC_ALL=de_CH.UTF-8
+      - TZ=Europe/Zurich
+      - HUGO_CACHEDIR=/cache
+      - HUGO_MODULE_WORKSPACE=${STAGE_DEPLOY_HUGO_MODULE_WORKSPACE}
+    command:
+      - hugo
+      - --buildDrafts=${STAGE_DEPLOY_HUGO_BUILD_DRAFTS}
+      - --buildExpired=${STAGE_DEPLOY_HUGO_BUILD_EXPIRED}
+      - --buildFuture=${STAGE_DEPLOY_HUGO_BUILD_FUTURE}
+      - --printPathWarnings=${STAGE_DEPLOY_HUGO_PRINT_PATH_WARNINGS}
+      - --printI18nWarnings=${TEST_SERVE_HUGO_PRINT_I18N_WARNINGS}
+      - --forceSyncStatic
+      - --cleanDestinationDir
+      - --contentDir=/content
+      - --configDir=/config
+      - --cacheDir=/cache
+      - --destination=/destination
+      - --environment=${STAGE_DEPLOY_HUGO_ENV}
+      - --logLevel=${STAGE_DEPLOY_HUGO_LOG_LEVEL}
+
+  # Services in PROD environment
+  prod_hugo_server:
+    container_name: ${SITE_ID}_${PROD_SERVE_ENV}_hugo_server
+    image: ${IMAGE_HUGO_FULL}   # Hugo Modules and Node.js
+    env_file:
+      - ${GLOBAL_ENV_FILE:-/dev/null}   # Environment variables for container
+    volumes:
+      - ${PROD_SERVE_HUGO_ROOT}:/src
+      - ${PROD_SERVE_CONTENT}:/content
+      - ${PROD_SERVE_HUGO_MODULES}:/modules
+      - ${PROD_SERVE_HUGO_CONF}:/config
+      - ${PROD_SERVE_CACHE}:/cache
+      - ${PROD_SERVE_DEST}:/destination
+    environment:
+      - HUGO_MODULE_WORKSPACE=${PROD_SERVE_HUGO_MODULE_WORKSPACE}
+    command:
+      - hugo
+      - --watch
+      - --buildDrafts=${PROD_SERVE_HUGO_BUILD_DRAFTS}
+      - --buildExpired=${PROD_SERVE_HUGO_BUILD_EXPIRED}
+      - --buildFuture=${PROD_SERVE_HUGO_BUILD_FUTURE}
+      - --printPathWarnings=${PROD_SERVE_HUGO_PRINT_PATH_WARNINGS}
+      - --printI18nWarnings=${TEST_SERVE_HUGO_PRINT_I18N_WARNINGS}
+      - --forceSyncStatic
+      - --cleanDestinationDir
+      - --minify
+      - --contentDir=/content
+      - --configDir=/config
+      - --cacheDir=/cache
+      - --destination=/destination
+      - --environment=${PROD_SERVE_HUGO_ENV}
+      - --baseURL=${PROD_SERVE_HUGO_BASE_URL}
+      - --logLevel=${PROD_SERVE_HUGO_LOG_LEVEL}
+
+  prod_caddy_server:
+    image: ${IMAGE_CADDY_PRODUCTION}
+    env_file:
+      - ${GLOBAL_ENV_FILE:-/dev/null}   # Environment variables for container
+    container_name: ${SITE_ID}_${PROD_SERVE_ENV}_caddy_server
+    environment:
+      - CADDY_ADMIN=${PROD_SERVE_CADDY_SERVER_BIND}:2019
+      - CADDY_HOSTNAME=${PROD_SERVE_HOSTNAME}
+      # Suppress warning `failed to sufficiently increase receive buffer size`
+      - QUIC_GO_DISABLE_RECEIVE_BUFFER_WARNING=true
+    ports:
+      - "${PROD_SERVE_CADDY_SERVER_ADDR}:${PROD_SERVE_CADDY_SERVER_PORT}:80"
+      - "${PROD_SERVE_CADDY_SERVER_ADDR}:${PROD_SERVE_CADDY_SERVER_TLS_PORT}:443"
+      - "${PROD_SERVE_CADDY_SERVER_ADDR}:${PROD_SERVE_CADDY_SERVER_ADMIN_PORT}:2019"
+    volumes:
+      - ${PROD_SERVE_DEST}:/srv/
+      - ${PROD_SERVE_CADDY_SERVER_CONF}:/etc/caddy
+      - ${PROD_SERVE_CADDY_SERVER_STATE}:/config
+
+  prod_hugo_build:
+    container_name: ${SITE_ID}_hugo_build_${PROD_DEPLOY_ENV}
+    image: ${IMAGE_HUGO_FULL}   # Hugo Modules and Node.js
+    env_file:
+      - ${GLOBAL_ENV_FILE:-/dev/null}   # Environment variables for container
+    volumes:
+      - ${PROD_DEPLOY_HUGO_ROOT}:/src
+      - ${PROD_DEPLOY_HUGO_MODULES}:/modules
+      - ${PROD_DEPLOY_CONTENT}:/content
+      - ${PROD_DEPLOY_HUGO_CONF}:/config
+      - ${PROD_DEPLOY_CACHE}:/cache
+      - ${PROD_DEPLOY_DEST}:/destination
+    environment:
+      - LANG=en_US
+      - LANGUAGE=en_US
+      - LC_CTYPE=en_US.UTF-8
+      - LC_NUMERIC=de_CH.UTF-8
+      - LC_TIME=de_CH.UTF-8
+      - LC_COLLATE=de_CH.UTF-8
+      - LC_MONETARY=de_CH.UTF-8
+      - LC_MESSAGES=en_US.UTF-8
+      - LC_PAPER=de_CH.UTF-8
+      - LC_NAME=de_CH.UTF-8
+      - LC_ADDRESS=de_CH.UTF-8
+      - LC_TELEPHONE=de_CH.UTF-8
+      - LC_MEASUREMENT=de_CH.UTF-8
+      - LC_IDENTIFICATION=de_CH.UTF-8
+      - LC_ALL=de_CH.UTF-8
+      - TZ=Europe/Zurich
+      - HUGO_CACHEDIR=/cache
+      - HUGO_MODULE_WORKSPACE=${PROD_DEPLOY_HUGO_MODULE_WORKSPACE}
+    command:
+      - hugo
+      - --buildDrafts=${PROD_DEPLOY_HUGO_BUILD_DRAFTS}
+      - --buildExpired=${PROD_DEPLOY_HUGO_BUILD_EXPIRED}
+      - --buildFuture=${PROD_DEPLOY_HUGO_BUILD_FUTURE}
+      - --printPathWarnings=${PROD_DEPLOY_HUGO_PRINT_PATH_WARNINGS}
+      - --printI18nWarnings=${TEST_SERVE_HUGO_PRINT_I18N_WARNINGS}
+      - --forceSyncStatic
+      - --minify
+      - --cleanDestinationDir
+      - --contentDir=/content
+      - --configDir=/config
+      - --cacheDir=/cache
+      - --destination=/destination
+      - --environment=${PROD_DEPLOY_HUGO_ENV}
+      - --logLevel=${PROD_DEPLOY_HUGO_LOG_LEVEL}
+

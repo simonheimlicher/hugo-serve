@@ -1,0 +1,293 @@
+{
+    "folders": [
+        {
+            "path": "."
+        }
+    ],
+    "settings": {
+        "editor.formatOnSave": false
+    },
+    "launch": {
+        "version": "0.2.0",
+        "configurations": [
+            {
+                "name": "serve ps [verbose]",
+                "type": "python",
+                "request": "launch",
+                "program": "${workspaceFolder}/serve",
+                "args": ["--verbose", "ps"],
+                "console": "integratedTerminal"
+            },
+            {
+                "name": "in srvr.ch: serve prod [verbose]",
+                "type": "python",
+                "request": "launch",
+                "cwd": "${workspaceFolder}/../sites/srvr.ch",
+                "program": "${workspaceFolder}/serve",
+                "args": ["--verbose", "prod"],
+                "console": "integratedTerminal"
+            },
+            {
+                "name": "in claris.heimlicher.com: serve up [verbose]",
+                "type": "python",
+                "request": "launch",
+                "cwd": "${workspaceFolder}/../sites/claris.heimlicher.com",
+                "program": "${workspaceFolder}/serve",
+                "args": ["--verbose", "up"],
+                "console": "integratedTerminal"
+            },
+            {
+                "name": "in claris.heimlicher.com: serve down [verbose]",
+                "type": "python",
+                "request": "launch",
+                "cwd": "${workspaceFolder}/../sites/claris.heimlicher.com",
+                "program": "${workspaceFolder}/serve",
+                "args": ["--verbose", "down"],
+                "console": "integratedTerminal"
+            },
+            {
+                "name": "in claris.heimlicher.com: serve start [verbose]",
+                "type": "python",
+                "request": "launch",
+                "cwd": "${workspaceFolder}/../sites/claris.heimlicher.com",
+                "program": "${workspaceFolder}/serve",
+                "args": ["--verbose", "start"],
+                "console": "integratedTerminal"
+            },
+            {
+                "name": "in claris.heimlicher.com: serve stop [verbose]",
+                "type": "python",
+                "request": "launch",
+                "cwd": "${workspaceFolder}/../sites/claris.heimlicher.com",
+                "program": "${workspaceFolder}/serve",
+                "args": ["--verbose", "stop"],
+                "console": "integratedTerminal"
+            },
+            {
+                "name": "in claris.heimlicher.com: serve devel [verbose]",
+                "type": "python",
+                "request": "launch",
+                "cwd": "${workspaceFolder}/../sites/claris.heimlicher.com",
+                "program": "${workspaceFolder}/serve",
+                "args": ["--verbose", "devel"],
+                "console": "integratedTerminal"
+            },
+            {
+                "name": "in claris.heimlicher.com: serve test [verbose]",
+                "type": "python",
+                "request": "launch",
+                "cwd": "${workspaceFolder}/../sites/claris.heimlicher.com",
+                "program": "${workspaceFolder}/serve",
+                "args": ["--verbose", "test"],
+                "console": "integratedTerminal"
+            },
+            {
+                "name": "in claris.heimlicher.com: serve stage [verbose]",
+                "type": "python",
+                "request": "launch",
+                "cwd": "${workspaceFolder}/../sites/claris.heimlicher.com",
+                "program": "${workspaceFolder}/serve",
+                "args": ["--verbose", "stage"],
+                "console": "integratedTerminal"
+            },
+            {
+                "name": "in claris.heimlicher.com: serve stage restart [debug,verbose]",
+                "type": "python",
+                "request": "launch",
+                "cwd": "${workspaceFolder}/../sites/claris.heimlicher.com",
+                "program": "${workspaceFolder}/serve",
+                "args": ["--verbose", "--debug", "stage", "restart"],
+                "console": "integratedTerminal"
+            },
+            {
+                "name": "in heimlicher.com: serve up [verbose]",
+                "type": "python",
+                "request": "launch",
+                "cwd": "${workspaceFolder}/../sites/heimlicher.com",
+                "program": "${workspaceFolder}/serve",
+                "args": ["--verbose", "up"],
+                "console": "integratedTerminal"
+            },
+            {
+                "name": "in heimlicher.com: serve down [verbose]",
+                "type": "python",
+                "request": "launch",
+                "cwd": "${workspaceFolder}/../sites/heimlicher.com",
+                "program": "${workspaceFolder}/serve",
+                "args": ["--verbose", "down"],
+                "console": "integratedTerminal"
+            },
+            {
+                "name": "in heimlicher.com: serve start [verbose]",
+                "type": "python",
+                "request": "launch",
+                "cwd": "${workspaceFolder}/../sites/heimlicher.com",
+                "program": "${workspaceFolder}/serve",
+                "args": ["--verbose", "start"],
+                "console": "integratedTerminal"
+            },
+            {
+                "name": "in heimlicher.com: serve stop [verbose]",
+                "type": "python",
+                "request": "launch",
+                "cwd": "${workspaceFolder}/../sites/heimlicher.com",
+                "program": "${workspaceFolder}/serve",
+                "args": ["--verbose", "stop"],
+                "console": "integratedTerminal"
+            },
+            {
+                "name": "in heimlicher.com: serve devel [verbose]",
+                "type": "python",
+                "request": "launch",
+                "cwd": "${workspaceFolder}/../sites/heimlicher.com",
+                "program": "${workspaceFolder}/serve",
+                "args": ["--verbose", "devel"],
+                "console": "integratedTerminal"
+            },
+            {
+                "name": "in heimlicher.com: serve test [verbose]",
+                "type": "python",
+                "request": "launch",
+                "cwd": "${workspaceFolder}/../sites/heimlicher.com",
+                "program": "${workspaceFolder}/serve",
+                "args": ["--verbose", "test"],
+                "console": "integratedTerminal"
+            },
+            {
+                "name": "in heimlicher.com: serve stage [verbose]",
+                "type": "python",
+                "request": "launch",
+                "cwd": "${workspaceFolder}/../sites/heimlicher.com",
+                "program": "${workspaceFolder}/serve",
+                "args": ["--verbose", "stage"],
+                "console": "integratedTerminal"
+            },
+            {
+                "name": "serve up heimlicher.{sh|com}[test] [verbose]",
+                "type": "python",
+                "request": "launch",
+                "program": "${workspaceFolder}/serve",
+                "args": [
+                    "--verbose",
+                    "--env",
+                    "test",
+                    "up",
+                    "heimlicher.sh",
+                    "heimlicher.com"
+                ],
+                "console": "integratedTerminal"
+            },
+            {
+                "name": "serve up heimlicher.com",
+                "type": "python",
+                "request": "launch",
+                "program": "${workspaceFolder}/serve",
+                "args": ["up", "heimlicher.com"],
+                "console": "integratedTerminal"
+            },
+            {
+                "name": "serve up heimlicher.com [verbose]",
+                "type": "python",
+                "request": "launch",
+                "program": "${workspaceFolder}/serve",
+                "args": ["--verbose", "up", "heimlicher.com"],
+                "console": "integratedTerminal"
+            },
+            {
+                "name": "serve up heimlicher.com[devel] [verbose]",
+                "type": "python",
+                "request": "launch",
+                "program": "${workspaceFolder}/serve",
+                "args": ["--verbose", "--env", "devel", "up", "heimlicher.com"],
+                "console": "integratedTerminal"
+            },
+            {
+                "name": "serve restart heimlicher.com[devel] [verbose]",
+                "type": "python",
+                "request": "launch",
+                "program": "${workspaceFolder}/serve",
+                "args": [
+                    "--verbose",
+                    "--env",
+                    "devel",
+                    "restart",
+                    "heimlicher.com"
+                ],
+                "console": "integratedTerminal"
+            },
+            {
+                "name": "serve stop heimlicher.com[devel] [verbose]",
+                "type": "python",
+                "request": "launch",
+                "program": "${workspaceFolder}/serve",
+                "args": [
+                    "--verbose",
+                    "--env",
+                    "devel",
+                    "stop",
+                    "heimlicher.com"
+                ],
+                "console": "integratedTerminal"
+            },
+            {
+                "name": "serve up heimlicher.com[stage] [verbose]",
+                "type": "python",
+                "request": "launch",
+                "program": "${workspaceFolder}/serve",
+                "args": ["--verbose", "--env", "stage", "up", "heimlicher.com"],
+                "console": "integratedTerminal"
+            },
+            {
+                "name": "serve restart heimlicher.com[stage] [verbose]",
+                "type": "python",
+                "request": "launch",
+                "program": "${workspaceFolder}/serve",
+                "args": [
+                    "--verbose",
+                    "--env",
+                    "stage",
+                    "restart",
+                    "heimlicher.com"
+                ],
+                "console": "integratedTerminal"
+            },
+            {
+                "name": "serve stop heimlicher.com[stage] [verbose]",
+                "type": "python",
+                "request": "launch",
+                "program": "${workspaceFolder}/serve",
+                "args": [
+                    "--verbose",
+                    "--env",
+                    "stage",
+                    "stop",
+                    "heimlicher.com"
+                ],
+                "console": "integratedTerminal"
+            },
+            {
+                "name": "serve deploy heimlicher.com[prod] [verbose]",
+                "type": "python",
+                "request": "launch",
+                "program": "${workspaceFolder}/serve",
+                "args": [
+                    "--verbose",
+                    "--env",
+                    "prod",
+                    "deploy",
+                    "heimlicher.com"
+                ],
+                "console": "integratedTerminal"
+            },
+            {
+                "name": "in resume.social-migrate: serve devel [verbose]",
+                "type": "python",
+                "request": "launch",
+                "cwd": "${workspaceFolder}/../sites/resume.social-migrate",
+                "program": "${workspaceFolder}/serve",
+                "args": ["--verbose", "devel"],
+                "console": "integratedTerminal"
+            },
+        ]
+    }
+}

@@ -1,0 +1,8 @@
+.DS_Store
+.python-version
+.python-virtualenv
+.env
+.envrc
+.env*
+*.env
+env.*
